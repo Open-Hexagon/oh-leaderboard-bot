@@ -2,10 +2,16 @@ import re
 import math
 import time
 import json
+
 import requests
 import urllib.parse
 import discord
 from discord.ext import tasks
+
+from collections.abc import Sequence
+from discord import Message
+from discord.channel import TextChannel
+from typing import cast, TypedDict
 
 REFRESH_TIME = 60 # seconds
 SCORES_THRESHOLD = 4
@@ -13,7 +19,58 @@ EDIT_TIME = 900 # improvements within 15 minutes of each other result in an edit
 LB_CHANNEL_ID = 412356109018595329
 LB_API_SERVER = "https://openhexagon.fun:8001"
 
-def rreplace(s, old, new):
+## TYPEDEFS
+
+# Generic JSON typedef that uses type erasure.
+type JSON_Dict = dict[str, object]
+# Each level has their level ID and number of difficulties in a tuple
+type OpenHexagon_Level = tuple[str, int]
+
+### STUBS FOR DIFFERENT DICTIONARIES
+
+class Level_Options(TypedDict):
+    difficulty_mult: float
+
+class Score_Dict(TypedDict):
+    timestamp: float
+
+    pack: str
+    level: str
+    level_options: dict[str, Level_Options]
+    
+    value: float
+    position: int
+    user_name: str
+    replay_hash: str
+
+    # The message ID is not immediately assigned to a score dictionary, so it must be optional
+    message_id: int | None
+
+# Take saved_state.json and annotate the types
+class Task_State(TypedDict):
+    last_call_timestamp: float
+    video_queue: list[Score_Dict]
+    recent_scores: list[Score_Dict]
+
+class OpenHexagon_Pack(TypedDict):
+    pack_name: str
+    levels: dict[str, OpenHexagon_Level]
+
+# A 1:1 mapping of level metadata with the leaderboard API
+class Leaderboard_Level_Metadata(TypedDict):
+    id: str
+    name: str
+    options: dict[str, Level_Options]
+
+# A 1:1 mapping of pack metadata with the leaderboard API
+class Leaderboard_Pack_Metadata(TypedDict):
+    id: str
+    name: str
+    levels: list[Leaderboard_Level_Metadata]
+
+## FUNCTIONS
+
+def rreplace(s: str, old: str, new: str) -> str:
     return new.join(s.rsplit(old, 1))
 
 def log(s : str):
@@ -22,11 +79,14 @@ def log(s : str):
     time_str = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"OH-Leaderboard-Bot ({time_str}{ms_f}): " + s)
 
-class leaderboard_client(discord.Client):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+## IMPL
 
-    async def on_ready(self):
+class leaderboard_client(discord.Client):
+    def __init__(self, *args: object, **kwargs: object):
+        super().__init__(*args, **kwargs)
+        self.pack_lookup: dict[str, OpenHexagon_Pack] = {}
+
+    async def on_ready(self) -> None:
         assert isinstance(self.user, discord.ClientUser)
         log(f"Logged in as {self.user} (ID: {self.user.id})")
 
@@ -35,57 +95,59 @@ class leaderboard_client(discord.Client):
         self.create_lookup_table()
 
         # start the task to run in the background
-        self.check_scores_task.start()
+        self.check_scores_task.start() 
         log(f"Started background task for leaderboard checking.")
 
     @tasks.loop(seconds=REFRESH_TIME)  # task runs every REFRESH_TIME seconds
     async def check_scores_task(self):
-        saved_state = {}
         try:
             with open("saved_state.json") as fp:
-                saved_state = json.load(fp)
+                saved_state: Task_State = cast(Task_State, json.load(fp))
+
+                saved_state["video_queue"] = saved_state.get("video_queue", [])
+                saved_state["last_call_timestamp"] = saved_state.get("last_call_timestamp", 0)
+                saved_state["recent_scores"] = saved_state.get("recent_scores", [])
+
+                current_time: float = time.time()
+                time_difference: int = math.ceil(current_time - saved_state["last_call_timestamp"])
+                saved_state["last_call_timestamp"] = current_time
+
+                log(f"Requesting scores from the past {time_difference} seconds.")
+                recent_scores = requests.get(f'{LB_API_SERVER}/get_newest_scores/{time_difference}')
+
+                scores_json: list[Score_Dict] = cast(list[Score_Dict], recent_scores.json())
+                log(f"{len(scores_json)} scores found.")
+                await self.send_wrs(scores_json, saved_state)
+                await self.check_videos(saved_state["video_queue"])
+                with open("saved_state.json", "w") as fp:
+                    json.dump(saved_state, fp)
+                log("Done.")
         except FileNotFoundError:
             pass  # just uses defaults
-        saved_state["video_queue"] = saved_state.get("video_queue", [])
-        saved_state["last_call_timestamp"] = saved_state.get("last_call_timestamp", 0)
-        saved_state["recent_scores"] = saved_state.get("recent_scores", [])
-
-        current_time = time.time()
-        time_difference = math.ceil(current_time - saved_state["last_call_timestamp"])
-        saved_state["last_call_timestamp"] = current_time
-
-        log(f"Requesting scores from the past {time_difference} seconds.")
-        recent_scores = requests.get(f'{LB_API_SERVER}/get_newest_scores/{time_difference}')
-
-        scores_json = recent_scores.json()
-        log(f"{len(scores_json)} scores found.")
-        await self.send_wrs(scores_json, saved_state)
-        await self.check_videos(saved_state["video_queue"])
-        with open("saved_state.json", "w") as fp:
-            json.dump(saved_state, fp)
-        log("Done.")
-
-    async def send_wrs(self, scores_json, saved_state):
-        channel = self.get_output_channel()
+        
+    async def send_wrs(self, scores_json: list[Score_Dict], saved_state: Task_State):
+        channel: TextChannel = self.get_output_channel()
         for score in scores_json:
-            rank = score["position"]
+            rank: int = score["position"]
 
             if rank == 1:
-                pack_ID = score["pack"]
-                level_ID = score["level"]
+                pack_ID: str = score["pack"]
+                level_ID: str = score["level"]
 
-                pack_ID_str = urllib.parse.quote(pack_ID)
-                level_ID_str = urllib.parse.quote(level_ID)
-                level_options_str = urllib.parse.quote(json.dumps(score["level_options"]))
+                pack_ID_str: str = urllib.parse.quote(pack_ID)
+                level_ID_str: str = urllib.parse.quote(level_ID)
+                level_options_str: str = urllib.parse.quote(json.dumps(score["level_options"]))
 
                 try:
-                    lb_scores = requests.get(f"{LB_API_SERVER}/get_leaderboard/{pack_ID_str}/{level_ID_str}/{level_options_str}").json()
+                    lb_scores: JSON_Dict = cast(JSON_Dict, requests.get(f"{LB_API_SERVER}/get_leaderboard/{pack_ID_str}/{level_ID_str}/{level_options_str}").json())
                     num_lb_scores = len(lb_scores)
                 except:
                     log(f"WARNING: Could not get leaderboard for {LB_API_SERVER}/get_leaderboard/{pack_ID_str}/{level_ID_str}/{level_options_str}.")
                     num_lb_scores = SCORES_THRESHOLD # allow score
 
                 if num_lb_scores >= SCORES_THRESHOLD:
+                    pack_name: str
+                    level_name: str
                     try:
                         pack_name = self.pack_lookup[pack_ID]["pack_name"]
                         level_name = self.pack_lookup[pack_ID]["levels"][level_ID][0]
@@ -96,33 +158,33 @@ class leaderboard_client(discord.Client):
                         pack_name = self.pack_lookup[pack_ID]["pack_name"]
                         level_name = self.pack_lookup[pack_ID]["levels"][level_ID][0]
 
-                    num_diffs = self.pack_lookup[pack_ID]["levels"][level_ID][1]
+                    num_diffs: int = self.pack_lookup[pack_ID]["levels"][level_ID][1]
+                    mult: str = f"{score['level_options']['difficulty_mult']:.6g}"
+                    diff: str = ""
 
-                    mult = f"{score['level_options']['difficulty_mult']:.6g}"
-
-                    diff_str = ""
                     if num_diffs > 1:
-                        diff_str = f" [x{mult}]"
+                        diff = f" [x{mult}]"
                     # if level has only 1 difficulty, but score wasn't set on x1, something is wrong
                     elif mult != "1":
                         log(f"WARNING: Level {level_ID} may have added difficulty mults, refreshing  cache.")
                         self.create_lookup_table()
-                        diff_str = f" [x{mult}]"
+                        diff = f" [x{mult}]"
 
-                    player = score["user_name"]
-                    run_length = round(score["value"], 3)
+                    player: str = score["user_name"]
+                    run_length: float = round(score["value"], 3)
 
                     if pack_name[0] == "#":
                         pack_name = "\\" + pack_name
 
-                    score_text = f"**{pack_name} - {level_name}{diff_str}** <:hexagon:1388672832094867486> **{player}** achieved **#{rank}** with a score of **{run_length}**"
+                    score_text: str = f"**{pack_name} - {level_name}{diff}** <:hexagon:1388672832094867486> **{player}** achieved **#{rank}** with a score of **{run_length}**"
 
                     # remove old messages from the edit queue
                     for last_score in saved_state["recent_scores"]:
                         if score["timestamp"] - last_score["timestamp"] > EDIT_TIME:
                             saved_state["recent_scores"].remove(last_score)
 
-                    edited = False
+                    edited: bool = False
+                    msg: Message | None = None
                     # check if score could be edited into a previous message 
                     for last_score in saved_state["recent_scores"]:
                         if score["pack"] == last_score.get("pack", "") and \
@@ -133,7 +195,8 @@ class leaderboard_client(discord.Client):
                             if score["user_name"] != last_score["user_name"] and score["value"] > last_score["value"]:
                                 saved_state["recent_scores"].remove(last_score)
                                 break
-
+                            
+                            assert isinstance(last_score["message_id"], int), "Attempt to append text into a previous score message, but it doesn't exist"
                             msg = await channel.fetch_message(last_score["message_id"])
 
                             new_content = msg.content + "\n" + score_text
@@ -149,15 +212,17 @@ class leaderboard_client(discord.Client):
                         msg = await channel.send(score_text)
                         saved_state["recent_scores"].append({**score, "message_id": msg.id})
                     
-                    if rank == 1:
+                    if rank == 1 and msg:
                         saved_state["video_queue"].append({**score, "message_id": msg.id})
+                    # Logically speaking, msg should always be bound, but if it ends up being unbound, log it.
+                    elif not msg:
+                        log("Error: A previous message for a score was not found, and no new message was made!")
 
-    async def check_videos(self, queue):
+    async def check_videos(self, queue: list[Score_Dict]):
         channel = self.get_output_channel()
         log(f"Checking {len(queue)} queued messages for video progress.")
         while len(queue) > 0:
-            score = queue[0]
-            has_better = False
+            score: Score_Dict = queue[0]
             for i in range(1, len(queue)):
                 later_score = queue[i]
                 # python does not compare dicts by reference but by contents, so yes the level_options part is fine
@@ -170,8 +235,8 @@ class leaderboard_client(discord.Client):
                     queue.pop(0)
                     return
             # check if video exists
-            replay_hash = score["replay_hash"]
-            video_link = f"{LB_API_SERVER}/get_video/{replay_hash}"
+            replay_hash: str = score["replay_hash"]
+            video_link: str = f"{LB_API_SERVER}/get_video/{replay_hash}"
             try:
                 response_headers = requests.get(video_link, headers={"Range": "bytes=0-0"}).headers
             except Exception as e:
@@ -179,8 +244,9 @@ class leaderboard_client(discord.Client):
                 return
             if response_headers["Content-Type"] == "video/mp4":
                 # exists now, edit message to include link
+                assert isinstance(score["message_id"], int), "Can't attach video to a score with no assigned Discord message"
                 message = await channel.fetch_message(score["message_id"])
-                run_length = round(score["value"], 3)
+                run_length: float = round(score["value"], 3)
 
                 # remove previous links
                 new_content = re.sub("\\[(.+)\\]\\(.+\\)", "\\1", message.content)
@@ -193,32 +259,22 @@ class leaderboard_client(discord.Client):
             else:
                 return
 
-    @check_scores_task.before_loop # type: ignore
+    @check_scores_task.before_loop  # pyright: ignore[reportArgumentType]
     async def before_my_task(self):
         await self.wait_until_ready()  # wait until the bot logs in
     
-    def get_output_channel(self):
+    def get_output_channel(self) -> TextChannel:
         channel = self.get_channel(LB_CHANNEL_ID)
         if not channel:
             log(f"ERROR: Could not find channel <{LB_CHANNEL_ID}>.")
-            return
-        assert isinstance(channel, discord.TextChannel), "You have set your output to a channel that isn't a text channel."
+        assert isinstance(channel, TextChannel), "You have set your output to a channel that isn't a text channel."
         return channel
 
     def create_lookup_table(self):
-        all_packs = requests.get(f"{LB_API_SERVER}/get_packs/1/1000")
+        all_packs_json: Sequence[Leaderboard_Pack_Metadata] = cast(Sequence[Leaderboard_Pack_Metadata], requests.get(f"{LB_API_SERVER}/get_packs/1/1000").json())
 
-        # pack_lookup: dict of dicts
-        # {
-        #     pack_id: {
-        #         "pack_name": str
-        #         "levels": {
-        #             level_id: (str, #difficulties)
-        #         }
-        #     }
-        # }
         self.pack_lookup = {}
-        for pack_dict in all_packs.json():
+        for pack_dict in all_packs_json:
             self.pack_lookup[pack_dict["id"]] = {
                 "pack_name": pack_dict["name"],
                 "levels": {}
