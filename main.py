@@ -100,30 +100,31 @@ class leaderboard_client(discord.Client):
 
     @tasks.loop(seconds=REFRESH_TIME)  # task runs every REFRESH_TIME seconds
     async def check_scores_task(self):
+        saved_state: Task_State
         try:
             with open("saved_state.json") as fp:
-                saved_state: Task_State = cast(Task_State, json.load(fp))
-
-                saved_state["video_queue"] = saved_state.get("video_queue", [])
-                saved_state["last_call_timestamp"] = saved_state.get("last_call_timestamp", 0)
-                saved_state["recent_scores"] = saved_state.get("recent_scores", [])
-
-                current_time: float = time.time()
-                time_difference: int = math.ceil(current_time - saved_state["last_call_timestamp"])
-                saved_state["last_call_timestamp"] = current_time
-
-                log(f"Requesting scores from the past {time_difference} seconds.")
-                recent_scores = requests.get(f'{LB_API_SERVER}/get_newest_scores/{time_difference}')
-
-                scores_json: list[Score_Dict] = cast(list[Score_Dict], recent_scores.json())
-                log(f"{len(scores_json)} scores found.")
-                await self.send_wrs(scores_json, saved_state)
-                await self.check_videos(saved_state["video_queue"])
-                with open("saved_state.json", "w") as fp:
-                    json.dump(saved_state, fp)
-                log("Done.")
+                saved_state = cast(Task_State, json.load(fp))
         except FileNotFoundError:
-            pass  # just uses defaults
+            # Create a backup state with default values
+            saved_state = {
+                "video_queue": [],
+                "last_call_timestamp": 0,
+                "recent_scores": []
+            }
+        current_time: float = time.time()
+        time_difference: int = math.ceil(current_time - saved_state["last_call_timestamp"])
+        saved_state["last_call_timestamp"] = current_time
+
+        log(f"Requesting scores from the past {time_difference} seconds.")
+        recent_scores = requests.get(f'{LB_API_SERVER}/get_newest_scores/{time_difference}')
+
+        scores_json: list[Score_Dict] = cast(list[Score_Dict], recent_scores.json())
+        log(f"{len(scores_json)} scores found.")
+        await self.send_wrs(scores_json, saved_state)
+        await self.check_videos(saved_state["video_queue"])
+        with open("saved_state.json", "w") as fp:
+            json.dump(saved_state, fp)
+        log("Done.")
         
     async def send_wrs(self, scores_json: list[Score_Dict], saved_state: Task_State):
         channel: TextChannel = self.get_output_channel()
