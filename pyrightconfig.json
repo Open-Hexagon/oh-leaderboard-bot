@@ -1,0 +1,18 @@
+{
+  "include": [
+    "main.py"
+  ],
+
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "typings"
+  ],
+
+  "stubPath": "typings",
+
+  "pythonVersion": "3.13",
+
+  // Exempt these rules. They're too pedantic and hurts legibility
+  "reportUnusedCallResult": false,
+}
