@@ -111,8 +111,8 @@ class leaderboard_client(discord.Client):
                 "last_call_timestamp": 0,
                 "recent_scores": []
             }
-        current_time: float = time.time()
-        time_difference: int = math.ceil(current_time - saved_state["last_call_timestamp"])
+        current_time = time.time()
+        time_difference = math.ceil(current_time - saved_state["last_call_timestamp"])
         saved_state["last_call_timestamp"] = current_time
 
         log(f"Requesting scores from the past {time_difference} seconds.")
@@ -129,15 +129,15 @@ class leaderboard_client(discord.Client):
     async def send_wrs(self, scores_json: list[Score_Dict], saved_state: Task_State):
         channel: TextChannel = self.get_output_channel()
         for score in scores_json:
-            rank: int = score["position"]
+            rank = score["position"]
 
             if rank == 1:
-                pack_ID: str = score["pack"]
-                level_ID: str = score["level"]
+                pack_ID = score["pack"]
+                level_ID = score["level"]
 
-                pack_ID_str: str = urllib.parse.quote(pack_ID)
-                level_ID_str: str = urllib.parse.quote(level_ID)
-                level_options_str: str = urllib.parse.quote(json.dumps(score["level_options"]))
+                pack_ID_str = urllib.parse.quote(pack_ID)
+                level_ID_str = urllib.parse.quote(level_ID)
+                level_options_str = urllib.parse.quote(json.dumps(score["level_options"]))
 
                 try:
                     lb_scores: JSON_Dict = cast(JSON_Dict, requests.get(f"{LB_API_SERVER}/get_leaderboard/{pack_ID_str}/{level_ID_str}/{level_options_str}").json())
@@ -147,8 +147,6 @@ class leaderboard_client(discord.Client):
                     num_lb_scores = SCORES_THRESHOLD # allow score
 
                 if num_lb_scores >= SCORES_THRESHOLD:
-                    pack_name: str
-                    level_name: str
                     try:
                         pack_name = self.pack_lookup[pack_ID]["pack_name"]
                         level_name = self.pack_lookup[pack_ID]["levels"][level_ID][0]
@@ -159,9 +157,9 @@ class leaderboard_client(discord.Client):
                         pack_name = self.pack_lookup[pack_ID]["pack_name"]
                         level_name = self.pack_lookup[pack_ID]["levels"][level_ID][0]
 
-                    num_diffs: int = self.pack_lookup[pack_ID]["levels"][level_ID][1]
-                    mult: str = f"{score['level_options']['difficulty_mult']:.6g}"
-                    diff: str = ""
+                    num_diffs = self.pack_lookup[pack_ID]["levels"][level_ID][1]
+                    mult = f"{score['level_options']['difficulty_mult']:.6g}"
+                    diff = ""
 
                     if num_diffs > 1:
                         diff = f" [x{mult}]"
@@ -171,20 +169,20 @@ class leaderboard_client(discord.Client):
                         self.create_lookup_table()
                         diff = f" [x{mult}]"
 
-                    player: str = score["user_name"]
+                    player = score["user_name"]
                     run_length: float = round(score["value"], 3)
 
                     if pack_name[0] == "#":
                         pack_name = "\\" + pack_name
 
-                    score_text: str = f"**{pack_name} - {level_name}{diff}** <:hexagon:1388672832094867486> **{player}** achieved **#{rank}** with a score of **{run_length}**"
+                    score_text = f"**{pack_name} - {level_name}{diff}** <:hexagon:1388672832094867486> **{player}** achieved **#{rank}** with a score of **{run_length}**"
 
                     # remove old messages from the edit queue
                     for last_score in saved_state["recent_scores"]:
                         if score["timestamp"] - last_score["timestamp"] > EDIT_TIME:
                             saved_state["recent_scores"].remove(last_score)
 
-                    edited: bool = False
+                    edited = False
                     msg: Message | None = None
                     # check if score could be edited into a previous message 
                     for last_score in saved_state["recent_scores"]:
@@ -236,8 +234,8 @@ class leaderboard_client(discord.Client):
                     queue.pop(0)
                     return
             # check if video exists
-            replay_hash: str = score["replay_hash"]
-            video_link: str = f"{LB_API_SERVER}/get_video/{replay_hash}"
+            replay_hash = score["replay_hash"]
+            video_link = f"{LB_API_SERVER}/get_video/{replay_hash}"
             try:
                 response_headers = requests.get(video_link, headers={"Range": "bytes=0-0"}).headers
             except Exception as e:
@@ -247,7 +245,7 @@ class leaderboard_client(discord.Client):
                 # exists now, edit message to include link
                 assert isinstance(score["message_id"], int), "Can't attach video to a score with no assigned Discord message"
                 message = await channel.fetch_message(score["message_id"])
-                run_length: float = round(score["value"], 3)
+                run_length = round(score["value"], 3)
 
                 # remove previous links
                 new_content = re.sub("\\[(.+)\\]\\(.+\\)", "\\1", message.content)
